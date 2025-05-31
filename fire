@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>多人协作文本输入工具</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <script src="https://www.gstatic.com/firebasejs/9.15.0/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.15.0/firebase-database.js"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#4F46E5',
+                        secondary: '#10B981',
+                        user: '#3B82F6',    // 当前用户颜色
+                        others: '#F59E0B',  // 其他用户颜色
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'system-ui', 'sans-serif'],
+                    },
+                }
+            }
+        }
+    </script>
+    <style type="text/tailwindcss">
+        @layer utilities {
+            .content-auto {
+                content-visibility: auto;
+            }
+            .transition-height {
+                transition: max-height 0.3s ease;
+            }
+            .user-tag {
+                @apply inline-block px-2 py-0.5 rounded-full text-xs font-medium;
+            }
+        }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen flex flex-col">
+    <div class="container mx-auto px-4 py-8 max-w-3xl">
+        <header class="text-center mb-8">
+            <h1 class="text-[clamp(1.8rem,4vw,2.5rem)] font-bold text-gray-800 mb-2">多人协作文本输入工具</h1>
+            <p class="text-gray-600">与他人实时协作，所有输入内容将实时同步显示</p>
+        </header>
+
+        <main class="bg-white rounded-xl shadow-lg p-6 mb-8 transform transition-all hover:shadow-xl">
+            <div class="space-y-6">
+                <div>
+                    <label for="inputText" class="block text-sm font-medium text-gray-700 mb-1">输入内容</label>
+                    <textarea id="inputText" rows="3" placeholder="请输入内容..." 
+                        class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary/50 focus:border-primary transition-all resize-none"></textarea>
+                </div>
+
+                <div class="text-center">
+                    <button id="submitBtn" 
+                        class="px-6 py-2.5 bg-primary text-white font-medium rounded-lg shadow-md hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-primary/50 focus:ring-offset-2 transform transition-all hover:scale-105">
+                        <i class="fa fa-paper-plane mr-2"></i>提交
+                    </button>
+                </div>
+
+                <div>
+                    <label for="outputText" class="block text-sm font-medium text-gray-700 mb-1">
+                        汇总内容 <span id="itemCount" class="text-xs text-gray-500">(0 条记录)</span>
+                    </label>
+                    <div class="relative">
+                        <div id="outputContainer" 
+                            class="w-full px-4 py-2 border border-gray-300 rounded-lg bg-gray-50 focus:ring-2 focus:ring-primary/50 focus:border-primary transition-all min-h-[120px] max-h-[300px] overflow-y-auto">
+                            <div id="outputText" class="prose prose-sm max-w-none"></div>
+                        </div>
+                        <button id="clearBtn" 
+                            class="absolute top-2 right-2 text-gray-400 hover:text-gray-600 focus:outline-none focus:ring-1 focus:ring-primary/50 rounded-full p-1 transition-colors">
+                            <i class="fa fa-trash-o"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <div id="connectionStatus" class="text-xs text-gray-500 text-center">
+                    <i class="fa fa-circle-o-notch fa-spin mr-1"></i>正在连接...
+                </div>
+            </div>
+        </main>
+
+        <footer class="text-center text-gray-500 text-sm">
+            <p>© 2025 多人协作文本输入工具 | 实时同步，高效协作</p>
+        </footer>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // 初始化Firebase（请替换为你的配置）
+            const firebaseConfig = {
+                apiKey: "YOUR_API_KEY",
+                authDomain: "YOUR_AUTH_DOMAIN",
+                databaseURL: "YOUR_DATABASE_URL",
+                projectId: "YOUR_PROJECT_ID",
+                storageBucket: "YOUR_STORAGE_BUCKET",
+                messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+                appId: "YOUR_APP_ID"
+            };
+            
+            const app = firebase.initializeApp(firebaseConfig);
+            const database = firebase.database();
+            const inputsRef = database.ref('inputs');
+            
+            // 获取或生成用户ID
+            function getUserId() {
+                let userId = localStorage.getItem('userId');
+                if (!userId) {
+                    userId = self.crypto.randomUUID();
+                    localStorage.setItem('userId', userId);
+                }
+                return userId;
+            }
+            
+            const userId = getUserId();
+            const inputText = document.getElementById('inputText');
+            const outputText = document.getElementById('outputText');
+            const submitBtn = document.getElementById('submitBtn');
+            const clearBtn = document.getElementById('clearBtn');
+            const itemCount = document.getElementById('itemCount');
+            const connectionStatus = document.getElementById('connectionStatus');
+            
+            let isConnected = false;
+            
+            // 监听连接状态
+            database.ref('.info/connected').on('value', (snap) => {
+                if (snap.val() === true) {
+                    isConnected = true;
+                    connectionStatus.innerHTML = '<i class="fa fa-check-circle text-green-500 mr-1"></i>已连接';
+                } else {
+                    isConnected = false;
+                    connectionStatus.innerHTML = '<i class="fa fa-exclamation-circle text-red-500 mr-1"></i>已断开连接';
+                }
+            });
+            
+            // 监听数据变化
+            inputsRef.on('value', (snapshot) => {
+                const inputs = [];
+                snapshot.forEach((childSnapshot) => {
+                    inputs.push({
+                        id: childSnapshot.key,
+                        ...childSnapshot.val()
+                    });
+                });
+                
+                // 按时间戳排序
+                inputs.sort((a, b) => a.timestamp - b.timestamp);
+                updateOutput(inputs);
+            });
+            
+            // 提交新内容
+            submitBtn.addEventListener('click', () => {
+                const text = inputText.value.trim();
+                if (text && isConnected) {
+                    inputsRef.push({
+                        text,
+                        timestamp: firebase.database.ServerValue.TIMESTAMP,
+                        user: userId
+                    });
+                    
+                    inputText.value = '';
+                    inputText.focus();
+                    
+                    // 添加提交成功动画
+                    submitBtn.classList.add('bg-secondary');
+                    submitBtn.innerHTML = '<i class="fa fa-check mr-2"></i>已提交';
+                    setTimeout(() => {
+                        submitBtn.classList.remove('bg-secondary');
+                        submitBtn.innerHTML = '<i class="fa fa-paper-plane mr-2"></i>提交';
+                    }, 1500);
+                } else if (!isConnected) {
+                    alert('无法提交：未连接到服务器');
+                }
+            });
+            
+            // 清空按钮点击事件
+            clearBtn.addEventListener('click', () => {
+                if (confirm('确定要清空所有汇总内容吗？')) {
+                    inputsRef.remove();
+                }
+            });
+            
+            // 输入框回车提交
+            inputText.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    submitBtn.click();
+                }
+            });
+            
+            // 更新输出内容
+            function updateOutput(inputs) {
+                outputText.innerHTML = '';
+                itemCount.textContent = `(${inputs.length} 条记录)`;
+                
+                inputs.forEach((item, index) => {
+                    const isCurrentUser = item.user === userId;
+                    const userColor = isCurrentUser ? 'bg-user/20 text-user' : 'bg-others/20 text-others';
+                    const userLabel = isCurrentUser ? '你' : '他人';
+                    
+                    const entry = document.createElement('div');
+                    entry.className = 'mb-4 pb-4 border-b border-gray-200 last:border-0 last:mb-0 last:pb-0';
+                    entry.innerHTML = `
+                        <div class="flex items-center mb-1">
+                            <span class="text-gray-500 mr-2">${index + 1}.</span>
+                            <span class="user-tag ${userColor}">${userLabel}</span>
+                            <span class="ml-2 text-xs text-gray-500">${formatTimestamp(item.timestamp)}</span>
+                        </div>
+                        <p class="text-gray-800 break-words">${escapeHTML(item.text)}</p>
+                    `;
+                    
+                    // 添加出现动画
+                    entry.style.opacity = '0';
+                    entry.style.transform = 'translateY(10px)';
+                    entry.style.transition = 'opacity 0.3s ease, transform 0.3s ease';
+                    
+                    outputText.appendChild(entry);
+                    
+                    // 触发动画
+                    setTimeout(() => {
+                        entry.style.opacity = '1';
+                        entry.style.transform = 'translateY(0)';
+                    }, 50 * index);
+                });
+                
+                // 滚动到底部
+                const container = document.getElementById('outputContainer');
+                container.scrollTop = container.scrollHeight;
+            }
+            
+            // 格式化时间戳
+            function formatTimestamp(timestamp) {
+                const date = new Date(timestamp);
+                return date.toLocaleTimeString('zh-CN', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit'
+                });
+            }
+            
+            // 转义HTML
+            function escapeHTML(text) {
+                return text
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#039;');
+            }
+        });
+    </script>
+</body>
+</html>
+    
